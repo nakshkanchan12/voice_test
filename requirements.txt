@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+aiohttp
+httpx
+openai
+faster-whisper
+jiwer
+datasets
+soundfile
+numpy
+silero-vad
+piper-tts
+huggingface-hub

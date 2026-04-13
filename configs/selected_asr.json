@@ -1,0 +1,12 @@
+{
+  "selected_model": "whisper-tiny-int8-beam1",
+  "backend": "faster-whisper",
+  "model_id": "tiny",
+  "device": "cuda",
+  "compute_type": "int8_float16",
+  "beam_size": 1,
+  "selected_at": "2026-04-12T10:44:30Z",
+  "source_report": "results/asr_compare_real_latest.json",
+  "dataset_source_used": "hf",
+  "wer_threshold_pct": 5.0
+}

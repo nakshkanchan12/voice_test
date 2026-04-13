@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-04-12T10:32:09.328377+00:00",
+  "benchmark": "asr_model_compare_real",
+  "dataset_source_requested": "hf",
+  "dataset_source_used": "hf",
+  "sample_count": 2,
+  "wer_threshold_pct": 5.0,
+  "device": "cuda",
+  "results": [
+    {
+      "model": "whisper-tiny-int8-beam1",
+      "model_id": "tiny",
+      "device": "cuda",
+      "compute_type": "int8_float16",
+      "beam_size": 1,
+      "samples": 2,
+      "latency_p50_ms": 264.1,
+      "latency_p95_ms": 272.01,
+      "latency_mean_ms": 264.1,
+      "wer_pct": 23.82,
+      "status": "ok"
+    },
+    {
+      "model": "whisper-small-int8-beam1",
+      "model_id": "small",
+      "device": "cuda",
+      "compute_type": "int8_float16",
+      "beam_size": 1,
+      "status": "timeout",
+      "error": "model load exceeded 90.0s"
+    }
+  ],
+  "selection": {
+    "winner": "whisper-tiny-int8-beam1",
+    "reason": "No model met WER threshold; selected lowest latency among successful runs",
+    "backend": "faster-whisper",
+    "model_id": "tiny",
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "beam_size": 1
+  }
+}

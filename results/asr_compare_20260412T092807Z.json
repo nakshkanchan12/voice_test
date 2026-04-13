@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-04-12T09:28:07.599858+00:00",
+  "benchmark": "asr_model_compare",
+  "dataset_source_requested": "mock",
+  "dataset_source_used": "mock",
+  "sample_count": 30,
+  "wer_threshold_pct": 5.0,
+  "results": [
+    {
+      "model": "nemotron-fastconformer-160ms",
+      "latency_p50_ms": 136.88,
+      "latency_p95_ms": 154.58,
+      "latency_mean_ms": 137.32,
+      "wer_pct": 15.42,
+      "samples": 30
+    },
+    {
+      "model": "parakeet-tdt-1.1b",
+      "latency_p50_ms": 218.43,
+      "latency_p95_ms": 248.01,
+      "latency_mean_ms": 221.4,
+      "wer_pct": 15.24,
+      "samples": 30
+    },
+    {
+      "model": "whisper-large-v3-turbo-int8-beam1",
+      "latency_p50_ms": 242.46,
+      "latency_p95_ms": 272.57,
+      "latency_mean_ms": 243.89,
+      "wer_pct": 17.46,
+      "samples": 30
+    },
+    {
+      "model": "whisper-medium-int8-beam1",
+      "latency_p50_ms": 254.45,
+      "latency_p95_ms": 280.04,
+      "latency_mean_ms": 255.9,
+      "wer_pct": 15.7,
+      "samples": 30
+    }
+  ],
+  "selection": {
+    "winner": "nemotron-fastconformer-160ms",
+    "reason": "No model met WER threshold; selected lowest latency overall"
+  }
+}

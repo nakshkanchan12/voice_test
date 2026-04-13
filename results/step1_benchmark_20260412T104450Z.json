@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-04-12T10:44:50.816022+00:00",
+  "benchmark": "step1_streaming_pipeline_mock",
+  "asr_mode": "real-faster-whisper",
+  "asr_model": "tiny",
+  "summary": {
+    "concurrency": 1,
+    "calls": 2,
+    "speech_to_first_audio_p50_ms": null,
+    "speech_to_first_audio_p95_ms": null,
+    "speech_to_done_p50_ms": 322.71,
+    "speech_to_done_p95_ms": 454.68,
+    "e2e_p50_ms": 322.83,
+    "e2e_p95_ms": 454.81,
+    "mean_asr_queue_wait_ms": 0.0,
+    "mean_tts_queue_wait_ms": 0.0,
+    "target_lt_700ms_hit_rate_pct": 0.0
+  },
+  "calls": [
+    {
+      "call_id": "call-0",
+      "turn_id": "turn-0",
+      "e2e_ms": 469.47,
+      "speech_to_first_text_ms": null,
+      "speech_to_first_audio_ms": null,
+      "speech_to_done_ms": 469.34,
+      "asr_queue_wait_ms": 0.0,
+      "tts_queue_wait_ms": 0.0,
+      "asr_segments": 0,
+      "llm_sentences": 0,
+      "tts_chunks": 0,
+      "audio_bytes": 0
+    },
+    {
+      "call_id": "call-0",
+      "turn_id": "turn-1",
+      "e2e_ms": 176.19,
+      "speech_to_first_text_ms": null,
+      "speech_to_first_audio_ms": null,
+      "speech_to_done_ms": 176.08,
+      "asr_queue_wait_ms": 0.0,
+      "tts_queue_wait_ms": 0.0,
+      "asr_segments": 0,
+      "llm_sentences": 0,
+      "tts_chunks": 0,
+      "audio_bytes": 0
+    }
+  ]
+}

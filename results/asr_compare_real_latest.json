@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-04-12T10:42:00Z",
+  "benchmark": "asr_model_compare_real_manual",
+  "dataset_source_used": "hf",
+  "sample_count": 2,
+  "notes": "Tiny model evaluated successfully on real HF audio. Small model load/transcribe did not complete within strict timeout in this environment.",
+  "results": [
+    {
+      "model_id": "tiny",
+      "status": "ok",
+      "latency_mean_ms": 306.37,
+      "latency_p50_ms": 446.73,
+      "wer_mean_pct": 23.82,
+      "source": "results/real_model_eval_tiny.json"
+    },
+    {
+      "model_id": "small",
+      "status": "timeout_or_failed",
+      "timeout_s": 90,
+      "source": "terminal ff2b8a34-4080-47ac-9f1b-75f8b8a29ef6"
+    }
+  ],
+  "selection": {
+    "winner": "whisper-tiny-int8-beam1",
+    "backend": "faster-whisper",
+    "model_id": "tiny",
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "beam_size": 1,
+    "reason": "Best verified real model under current environment constraints (successful run + measured latency/WER)."
+  }
+}

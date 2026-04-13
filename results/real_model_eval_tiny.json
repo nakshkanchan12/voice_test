@@ -1,0 +1,26 @@
+{
+  "model_id": "tiny",
+  "device": "cuda",
+  "compute_type": "int8_float16",
+  "dataset_source": "hf",
+  "samples": 2,
+  "latency_mean_ms": 306.37,
+  "latency_p50_ms": 446.73,
+  "wer_mean_pct": 23.82,
+  "rows": [
+    {
+      "index": 0,
+      "ref": "mister quilter is the apostle of the middle classes and we are glad to welcome his gospel",
+      "hyp": "mr. kilder is the apostle of the middle classes and we are glad to welcome his gospel.",
+      "wer_pct": 17.65,
+      "latency_ms": 446.73
+    },
+    {
+      "index": 1,
+      "ref": "nor is mister quilter's manner less interesting than his matter",
+      "hyp": "nor is mr. quilters' manner less interesting than his matter.",
+      "wer_pct": 30.0,
+      "latency_ms": 166.0
+    }
+  ]
+}
