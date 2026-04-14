@@ -4,23 +4,8 @@ from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
+from .text_chunking import finalize_tail, normalize_stream_mode, split_ready_chunks
 from .types import TurnRequest
-
-
-def _emit_complete_sentences(buffer: str) -> tuple[list[str], str]:
-    sentences: list[str] = []
-    start = 0
-
-    for index, char in enumerate(buffer):
-        if char not in ".!?\n":
-            continue
-
-        candidate = buffer[start : index + 1].strip()
-        if candidate:
-            sentences.append(candidate)
-        start = index + 1
-
-    return sentences, buffer[start:]
 
 
 class OpenAICompatibleLLM:
@@ -32,18 +17,23 @@ class OpenAICompatibleLLM:
         api_key: str = "EMPTY",
         temperature: float = 0.2,
         max_tokens: int = 120,
+        stream_mode: str = "sentence",
+        aggressive_min_tokens: int = 5,
     ) -> None:
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.stream_mode = normalize_stream_mode(stream_mode)
+        self.aggressive_min_tokens = max(2, aggressive_min_tokens)
 
     async def stream_sentences(
         self,
         transcript: str,
         request: TurnRequest,
     ) -> AsyncIterator[str]:
+        mode = normalize_stream_mode(request.llm_stream_mode or self.stream_mode)
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -64,10 +54,14 @@ class OpenAICompatibleLLM:
                 continue
 
             buffer += token
-            ready, buffer = _emit_complete_sentences(buffer)
-            for sentence in ready:
-                yield sentence
+            ready, buffer = split_ready_chunks(
+                buffer,
+                mode=mode,
+                aggressive_min_tokens=self.aggressive_min_tokens,
+            )
+            for chunk in ready:
+                yield chunk
 
-        tail = buffer.strip()
-        if tail:
-            yield tail if tail.endswith((".", "!", "?")) else f"{tail}."
+        tail = finalize_tail(buffer)
+        if tail is not None:
+            yield tail

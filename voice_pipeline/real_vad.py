@@ -18,14 +18,81 @@ class SileroVADProvider:
         min_speech_ms: int = 200,
         min_silence_ms: int = 300,
         threshold: float = 0.5,
+        streaming: bool = True,
+        partial_segment_ms: int = 320,
+        max_stream_segment_ms: int = 1280,
     ) -> None:
         self.sample_rate_hz = sample_rate_hz
         self.min_speech_ms = min_speech_ms
         self.min_silence_ms = min_silence_ms
         self.threshold = threshold
+        self.streaming = streaming
+        self.partial_segment_ms = max(40, partial_segment_ms)
+        self.max_stream_segment_ms = max(self.partial_segment_ms, max_stream_segment_ms)
         self.model = load_silero_vad()
 
     async def stream_segments(
+        self,
+        audio_stream: AsyncIterator[AudioChunk],
+    ) -> AsyncIterator[SpeechSegment]:
+        if self.streaming:
+            async for segment in self._stream_segments_incremental(audio_stream):
+                yield segment
+            return
+
+        async for segment in self._stream_segments_batch(audio_stream):
+            yield segment
+
+    async def _stream_segments_incremental(
+        self,
+        audio_stream: AsyncIterator[AudioChunk],
+    ) -> AsyncIterator[SpeechSegment]:
+        active_chunks: list[AudioChunk] = []
+        active_ms = 0
+        silence_ms = 0
+
+        async for chunk in audio_stream:
+            duration_ms = max(1, chunk.duration_ms)
+            if chunk.is_speech:
+                active_chunks.append(chunk)
+                active_ms += duration_ms
+                silence_ms = 0
+
+                if active_ms >= self.partial_segment_ms or active_ms >= self.max_stream_segment_ms:
+                    yield SpeechSegment(
+                        chunks=tuple(active_chunks),
+                        sample_rate_hz=self.sample_rate_hz,
+                        ended_by_silence=False,
+                    )
+                    # Keep a tiny trailing context so silence endpointing can still close the turn.
+                    active_chunks = active_chunks[-1:]
+                    active_ms = sum(max(1, chunk.duration_ms) for chunk in active_chunks)
+                continue
+
+            if not active_chunks:
+                continue
+
+            silence_ms += duration_ms
+            if silence_ms < self.min_silence_ms:
+                continue
+
+            yield SpeechSegment(
+                chunks=tuple(active_chunks),
+                sample_rate_hz=self.sample_rate_hz,
+                ended_by_silence=True,
+            )
+            active_chunks = []
+            active_ms = 0
+            silence_ms = 0
+
+        if active_chunks:
+            yield SpeechSegment(
+                chunks=tuple(active_chunks),
+                sample_rate_hz=self.sample_rate_hz,
+                ended_by_silence=False,
+            )
+
+    async def _stream_segments_batch(
         self,
         audio_stream: AsyncIterator[AudioChunk],
     ) -> AsyncIterator[SpeechSegment]:

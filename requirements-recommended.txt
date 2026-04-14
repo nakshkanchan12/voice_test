@@ -1,0 +1,22 @@
+# Core orchestration
+fastapi
+uvicorn[standard]
+httpx
+aiortc
+openai
+numpy
+soundfile
+silero-vad
+
+# ASR stack (Nemotron endpoint deployment is external)
+faster-whisper
+
+# LLM stack (SGLang)
+sglang
+
+# TTS stack (Qwen3-TTS via vLLM-Omni)
+vllm-omni
+
+# Optional performance packages (install per environment)
+# flash-attn
+# triton

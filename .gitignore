@@ -1,0 +1,43 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# IDE and local tooling state
+.vscode/
+.vscode-server/
+.copilot/
+
+# Local environment files
+.env
+.env.*
+configs/*.env
+!configs/*.env.example
+
+# Large model and cache artifacts
+.cache/
+models/
+*.safetensors
+*.onnx
+*.gguf
+
+# Sample/generated audio artifacts
+data/hf_sample_wavs/
+*.wav
+*.mp3
+*.flac
+
+# Benchmark outputs
+results/
+*.log

@@ -34,3 +34,6 @@ class TTSProvider(Protocol):
         request: TurnRequest,
     ) -> AsyncIterator[bytes]:
         ...
+
+    async def stop_streaming(self, turn_id: str) -> None:
+        ...

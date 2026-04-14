@@ -31,6 +31,9 @@ class SpeechSegment:
 class TurnRequest:
     call_id: str
     turn_id: str
+    llm_stream_mode: str = "aggressive"
+    enable_barge_in: bool = True
+    barge_in_min_speech_ms: int = 120
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

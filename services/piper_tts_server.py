@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from .webrtc_common import create_offer_handler
+
 VOICE = None
 SAMPLE_RATE = 22050
+WEBRTC_PEERS: set[Any] = set()
 
 
 class SynthesizeRequest(BaseModel):
@@ -69,6 +73,36 @@ def _stream_synthesis(text: str) -> AsyncIterator[bytes]:
     return _iter()
 
 
+async def _webrtc_rpc_handler(
+    op: str,
+    payload: dict[str, object],
+    stream: bool,
+) -> dict[str, object] | AsyncIterator[dict[str, str]]:
+    if op != "synthesize":
+        raise ValueError(f"Unsupported operation: {op}")
+
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise ValueError("Missing text payload")
+
+    async def _stream_payloads() -> AsyncIterator[dict[str, str]]:
+        async for part in _stream_synthesis(text):
+            if not part:
+                continue
+            yield {"audio_pcm_b64": base64.b64encode(part).decode("ascii")}
+
+    if stream:
+        return _stream_payloads()
+
+    chunks: list[bytes] = []
+    async for part in _stream_synthesis(text):
+        if part:
+            chunks.append(part)
+
+    joined = b"".join(chunks)
+    return {"audio_pcm_b64": base64.b64encode(joined).decode("ascii")}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global VOICE, SAMPLE_RATE
@@ -113,3 +147,6 @@ async def synthesize(payload: SynthesizeRequest) -> StreamingResponse:
             "x-channels": "1",
         },
     )
+
+
+app.post("/webrtc/offer")(create_offer_handler(WEBRTC_PEERS, _webrtc_rpc_handler))

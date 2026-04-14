@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import wave
 from pathlib import Path
+from typing import Any
 
 from .asr_dataset import load_audio_samples
 from .http_providers import HTTPASRProvider, HTTPTTSProvider
@@ -11,6 +12,22 @@ from .pipeline import StreamingVoicePipeline
 from .real_llm import OpenAICompatibleLLM
 from .real_vad import SileroVADProvider
 from .types import AudioChunk, TurnRequest
+from .webrtc_rpc import default_webrtc_offer_url
+
+
+async def _close_if_possible(instance: Any) -> None:
+    close_fn = getattr(instance, "close", None)
+    if close_fn is not None:
+        await close_fn()
+
+
+def _parse_bool_arg(value: str) -> bool:
+    token = value.strip().lower()
+    if token in {"1", "true", "yes", "y", "on"}:
+        return True
+    if token in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 
 def _pcm_to_chunks(pcm16: bytes, sample_rate_hz: int, chunk_ms: int = 20) -> list[AudioChunk]:
@@ -73,19 +90,52 @@ async def run_live_turn(args: argparse.Namespace) -> None:
     sample = samples[0]
     chunks = _pcm_to_chunks(sample.pcm16, sample.sample_rate_hz)
 
-    vad = SileroVADProvider(sample_rate_hz=sample.sample_rate_hz)
-    asr = HTTPASRProvider(base_url=args.asr_url)
-    llm = OpenAICompatibleLLM(
-        base_url=args.llm_base_url,
-        model=args.llm_model,
-        system_prompt=args.system_prompt,
-        api_key=args.llm_api_key,
+    vad = SileroVADProvider(
+        sample_rate_hz=sample.sample_rate_hz,
+        min_speech_ms=args.vad_min_speech_ms,
+        min_silence_ms=args.vad_min_silence_ms,
+        threshold=args.vad_threshold,
+        streaming=args.vad_streaming,
+        partial_segment_ms=args.vad_partial_segment_ms,
+        max_stream_segment_ms=args.vad_max_stream_segment_ms,
     )
-    tts = HTTPTTSProvider(base_url=args.tts_url)
+    if args.transport == "webrtc":
+        from .webrtc_providers import WebRTCASRProvider, WebRTCLLMProvider, WebRTCTTSProvider
+
+        asr_offer_url = args.asr_webrtc_offer_url or f"{args.asr_url.rstrip('/')}/webrtc/offer"
+        llm_offer_url = args.llm_webrtc_offer_url or default_webrtc_offer_url(args.llm_base_url)
+        tts_offer_url = args.tts_webrtc_offer_url or f"{args.tts_url.rstrip('/')}/webrtc/offer"
+
+        asr = WebRTCASRProvider(offer_url=asr_offer_url)
+        llm = WebRTCLLMProvider(
+            offer_url=llm_offer_url,
+            model=args.llm_model,
+            system_prompt=args.system_prompt,
+            stream_mode=args.llm_stream_mode,
+            aggressive_min_tokens=args.llm_aggressive_min_tokens,
+        )
+        tts = WebRTCTTSProvider(offer_url=tts_offer_url)
+    else:
+        asr = HTTPASRProvider(base_url=args.asr_url)
+        llm = OpenAICompatibleLLM(
+            base_url=args.llm_base_url,
+            model=args.llm_model,
+            system_prompt=args.system_prompt,
+            api_key=args.llm_api_key,
+            stream_mode=args.llm_stream_mode,
+            aggressive_min_tokens=args.llm_aggressive_min_tokens,
+        )
+        tts = HTTPTTSProvider(base_url=args.tts_url)
 
     pipeline = StreamingVoicePipeline(vad=vad, asr=asr, llm=llm, tts=tts)
 
-    request = TurnRequest(call_id="live-call-1", turn_id="live-turn-1")
+    request = TurnRequest(
+        call_id="live-call-1",
+        turn_id="live-turn-1",
+        llm_stream_mode=args.llm_stream_mode,
+        enable_barge_in=args.enable_barge_in,
+        barge_in_min_speech_ms=args.barge_in_min_speech_ms,
+    )
     output = await pipeline.run_turn_from_chunks(request=request, chunks=chunks)
 
     output_pcm = output.audio_bytes
@@ -94,11 +144,13 @@ async def run_live_turn(args: argparse.Namespace) -> None:
     _write_pcm_wav(output_path, output_pcm, sample_rate_hz=args.tts_sample_rate_hz)
 
     print("dataset_source_used=", source)
+    print("transport=", args.transport)
     print("output_wav=", str(output_path))
     print("latency=", output.latency.to_dict())
 
-    await asr.close()
-    await tts.close()
+    await _close_if_possible(asr)
+    await _close_if_possible(llm)
+    await _close_if_possible(tts)
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,15 +161,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-split", type=str, default="validation")
 
     parser.add_argument("--asr-url", type=str, default="http://127.0.0.1:8011")
-    parser.add_argument("--llm-base-url", type=str, default="http://127.0.0.1:8000/v1")
-    parser.add_argument("--llm-model", type=str, default="microsoft/Phi-3.5-mini-instruct")
+    parser.add_argument("--llm-base-url", type=str, default="http://127.0.0.1:30000/v1")
+    parser.add_argument("--llm-model", type=str, default="HuggingFaceTB/SmolLM2-360M-Instruct")
     parser.add_argument("--llm-api-key", type=str, default="EMPTY")
     parser.add_argument(
         "--system-prompt",
         type=str,
         default="You are a concise and compliant banking collection assistant.",
     )
+    parser.add_argument("--llm-stream-mode", type=str, default="aggressive", choices=["sentence", "aggressive"])
+    parser.add_argument("--llm-aggressive-min-tokens", type=int, default=5)
     parser.add_argument("--tts-url", type=str, default="http://127.0.0.1:8012")
+    parser.add_argument("--transport", type=str, default="http", choices=["http", "webrtc"])
+    parser.add_argument("--asr-webrtc-offer-url", type=str, default="")
+    parser.add_argument("--llm-webrtc-offer-url", type=str, default="")
+    parser.add_argument("--tts-webrtc-offer-url", type=str, default="")
+    parser.add_argument("--vad-threshold", type=float, default=0.5)
+    parser.add_argument("--vad-min-speech-ms", type=int, default=200)
+    parser.add_argument("--vad-min-silence-ms", type=int, default=300)
+    parser.add_argument("--vad-streaming", type=_parse_bool_arg, default=True)
+    parser.add_argument("--vad-partial-segment-ms", type=int, default=320)
+    parser.add_argument("--vad-max-stream-segment-ms", type=int, default=1280)
+    parser.add_argument("--enable-barge-in", type=_parse_bool_arg, default=True)
+    parser.add_argument("--barge-in-min-speech-ms", type=int, default=120)
     parser.add_argument("--tts-sample-rate-hz", type=int, default=22050)
     parser.add_argument("--output-wav", type=str, default="results/live_turn_output.wav")
     return parser.parse_args()

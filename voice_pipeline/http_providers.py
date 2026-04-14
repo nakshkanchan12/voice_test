@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 from typing import AsyncIterator
@@ -56,24 +57,56 @@ class HTTPTTSProvider:
         self.base_url = base_url.rstrip("/")
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout_s)
+        self._stop_events: dict[str, asyncio.Event] = {}
+        self._active_responses: dict[str, httpx.Response] = {}
+
+    @staticmethod
+    def _stream_key(request: TurnRequest) -> str:
+        return f"{request.call_id}:{request.turn_id}"
 
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
+    async def stop_streaming(self, turn_id: str) -> None:
+        for key, stop_event in list(self._stop_events.items()):
+            if not key.endswith(f":{turn_id}"):
+                continue
+
+            stop_event.set()
+            response = self._active_responses.get(key)
+            if response is None:
+                continue
+
+            try:
+                await response.aclose()
+            except Exception:
+                continue
+
     async def stream_audio(self, sentence: str, request: TurnRequest) -> AsyncIterator[bytes]:
+        stream_key = self._stream_key(request)
+        stop_event = asyncio.Event()
+        self._stop_events[stream_key] = stop_event
+
         payload = {
             "text": sentence,
             "call_id": request.call_id,
             "turn_id": request.turn_id,
         }
 
-        async with self._client.stream(
-            "POST",
-            f"{self.base_url}/synthesize",
-            json=payload,
-        ) as response:
-            response.raise_for_status()
-            async for chunk in response.aiter_bytes():
-                if chunk:
-                    yield chunk
+        try:
+            async with self._client.stream(
+                "POST",
+                f"{self.base_url}/synthesize",
+                json=payload,
+            ) as response:
+                self._active_responses[stream_key] = response
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    if stop_event.is_set():
+                        break
+                    if chunk:
+                        yield chunk
+        finally:
+            self._stop_events.pop(stream_key, None)
+            self._active_responses.pop(stream_key, None)

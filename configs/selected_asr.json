@@ -5,8 +5,8 @@
   "device": "cuda",
   "compute_type": "int8_float16",
   "beam_size": 1,
-  "selected_at": "2026-04-12T10:44:30Z",
-  "source_report": "results/asr_compare_real_latest.json",
+  "selected_at": "2026-04-13T09:59:06.695814+00:00",
+  "source_report": "asr_model_compare_real",
   "dataset_source_used": "hf",
   "wer_threshold_pct": 5.0
 }

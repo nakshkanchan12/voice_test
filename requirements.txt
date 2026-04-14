@@ -3,6 +3,7 @@ uvicorn[standard]
 python-multipart
 aiohttp
 httpx
+aiortc
 openai
 faster-whisper
 jiwer
@@ -12,3 +13,5 @@ numpy
 silero-vad
 piper-tts
 huggingface-hub
+transformers
+accelerate

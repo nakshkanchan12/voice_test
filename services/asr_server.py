@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, File, Form, UploadFile
+
+from .webrtc_common import create_offer_handler
 
 
 MODEL = None
 EXECUTOR: ThreadPoolExecutor | None = None
+WEBRTC_PEERS: set[Any] = set()
 
 
 def _resolve_device(device: str) -> str:
@@ -57,13 +62,64 @@ def _transcribe_file(audio_bytes: bytes, language: str | None, beam_size: int) -
         wav_path.unlink(missing_ok=True)
 
 
+async def _single_result(payload: dict[str, object]) -> AsyncIterator[dict[str, object]]:
+    yield payload
+
+
+async def _webrtc_rpc_handler(
+    op: str,
+    payload: dict[str, object],
+    stream: bool,
+) -> dict[str, object] | AsyncIterator[dict[str, object]]:
+    if op != "transcribe":
+        raise ValueError(f"Unsupported operation: {op}")
+
+    if EXECUTOR is None:
+        raise RuntimeError("ASR executor not initialized")
+
+    audio_wav_b64 = str(payload.get("audio_wav_b64", "")).strip()
+    if not audio_wav_b64:
+        raise ValueError("Missing audio_wav_b64 payload")
+
+    try:
+        audio_bytes = base64.b64decode(audio_wav_b64.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise ValueError("Invalid base64 audio payload") from exc
+
+    language = str(payload.get("language", "")).strip() or None
+    beam_size = int(os.getenv("ASR_BEAM_SIZE", "1"))
+
+    started = perf_counter()
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(
+        EXECUTOR,
+        _transcribe_file,
+        audio_bytes,
+        language,
+        beam_size,
+    )
+    latency_ms = round((perf_counter() - started) * 1000.0, 2)
+
+    result: dict[str, object] = {
+        "text": text,
+        "latency_ms": latency_ms,
+        "call_id": str(payload.get("call_id", "")),
+        "turn_id": str(payload.get("turn_id", "")),
+    }
+
+    if stream:
+        return _single_result(result)
+
+    return result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global MODEL, EXECUTOR
 
     from faster_whisper import WhisperModel
 
-    model_id = os.getenv("ASR_MODEL_ID", "small")
+    model_id = os.getenv("ASR_MODEL_ID", "tiny")
     desired_device = os.getenv("ASR_DEVICE", "auto")
     desired_compute = os.getenv("ASR_COMPUTE_TYPE", "int8_float16")
     workers = int(os.getenv("ASR_WORKERS", "2"))
@@ -89,7 +145,7 @@ app = FastAPI(title="Real ASR Server", lifespan=lifespan)
 async def health() -> dict[str, str]:
     return {
         "status": "ok" if MODEL is not None else "loading",
-        "model": os.getenv("ASR_MODEL_ID", "small"),
+        "model": os.getenv("ASR_MODEL_ID", "tiny"),
     }
 
 
@@ -123,3 +179,6 @@ async def transcribe(
         "call_id": call_id,
         "turn_id": turn_id,
     }
+
+
+app.post("/webrtc/offer")(create_offer_handler(WEBRTC_PEERS, _webrtc_rpc_handler))
