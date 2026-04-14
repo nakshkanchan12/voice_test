@@ -21,6 +21,15 @@ set -euo pipefail
 : "${TTS_WEBRTC_OFFER_URL:=}"
 : "${WAIT_FOR_HEALTH:=1}"
 
+# Full-duplex defaults
+: "${LLM_STREAM_MODE:=aggressive}"
+: "${LLM_AGGRESSIVE_MIN_TOKENS:=5}"
+: "${ENABLE_BARGE_IN:=1}"
+: "${BARGE_IN_MIN_SPEECH_MS:=120}"
+: "${VAD_STREAMING:=1}"
+: "${VAD_PARTIAL_SEGMENT_MS:=320}"
+: "${VAD_MAX_STREAM_SEGMENT_MS:=1280}"
+
 extra_flags=()
 if [[ "${WAIT_FOR_HEALTH}" == "1" ]]; then
   extra_flags+=(--wait-for-health)
@@ -40,8 +49,15 @@ python -m voice_pipeline.recommended_pipeline \
   --llm-base-url "${LLM_BASE_URL}" \
   --llm-webrtc-offer-url "${LLM_WEBRTC_OFFER_URL}" \
   --llm-model "${LLM_MODEL}" \
+  --llm-stream-mode "${LLM_STREAM_MODE}" \
+  --llm-aggressive-min-tokens "${LLM_AGGRESSIVE_MIN_TOKENS}" \
   --tts-url "${TTS_URL}" \
   --tts-webrtc-offer-url "${TTS_WEBRTC_OFFER_URL}" \
   --tts-mode "${TTS_MODE}" \
   --tts-model "${TTS_MODEL}" \
+  --enable-barge-in "${ENABLE_BARGE_IN}" \
+  --barge-in-min-speech-ms "${BARGE_IN_MIN_SPEECH_MS}" \
+  --vad-streaming "${VAD_STREAMING}" \
+  --vad-partial-segment-ms "${VAD_PARTIAL_SEGMENT_MS}" \
+  --vad-max-stream-segment-ms "${VAD_MAX_STREAM_SEGMENT_MS}" \
   "${extra_flags[@]}"

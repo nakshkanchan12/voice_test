@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from time import perf_counter
 from typing import AsyncIterator
 
 from .asr_catalog import ASR_MODEL_PROFILES, DEFAULT_ASR_MODEL
+from .text_chunking import finalize_tail, split_ready_chunks
 from .types import AudioChunk, SpeechSegment, TurnRequest
 
 
@@ -21,12 +23,14 @@ class MockVAD:
         buffer: list[AudioChunk] = []
         speech_ms = 0
         silence_ms = 0
+        last_speech_chunk_at: float | None = None
 
         async for chunk in audio_stream:
             if chunk.is_speech:
                 buffer.append(chunk)
                 speech_ms += chunk.duration_ms
                 silence_ms = 0
+                last_speech_chunk_at = perf_counter()
                 continue
 
             silence_ms += chunk.duration_ms
@@ -36,16 +40,20 @@ class MockVAD:
                         chunks=tuple(buffer),
                         sample_rate_hz=buffer[0].sample_rate_hz,
                         ended_by_silence=True,
+                        last_speech_chunk_at=last_speech_chunk_at,
+                        endpoint_at=perf_counter(),
                     )
                 buffer = []
                 speech_ms = 0
                 silence_ms = 0
+                last_speech_chunk_at = None
 
         if buffer and speech_ms >= self.min_speech_ms:
             yield SpeechSegment(
                 chunks=tuple(buffer),
                 sample_rate_hz=buffer[0].sample_rate_hz,
                 ended_by_silence=False,
+                last_speech_chunk_at=last_speech_chunk_at,
             )
 
 
@@ -85,9 +93,15 @@ class MockASR:
 
 
 class MockLLM:
-    def __init__(self, ttft_ms: float = 85.0, token_delay_ms: float = 8.0) -> None:
+    def __init__(
+        self,
+        ttft_ms: float = 85.0,
+        token_delay_ms: float = 8.0,
+        aggressive_min_tokens: int = 5,
+    ) -> None:
         self.ttft_ms = ttft_ms
         self.token_delay_ms = token_delay_ms
+        self.aggressive_min_tokens = max(2, aggressive_min_tokens)
 
     async def stream_sentences(
         self,
@@ -102,20 +116,26 @@ class MockLLM:
 
         await asyncio.sleep(self.ttft_ms / 1000.0)
 
-        token_buffer: list[str] = []
+        buffer = ""
         for token in response.split():
             await asyncio.sleep(self.token_delay_ms / 1000.0)
 
-            if token_buffer:
-                token_buffer.append(" ")
-            token_buffer.append(token)
+            if buffer:
+                buffer = f"{buffer} {token}"
+            else:
+                buffer = token
 
-            if token.endswith((".", "!", "?")):
-                yield "".join(token_buffer)
-                token_buffer = []
+            ready, buffer = split_ready_chunks(
+                buffer,
+                mode=request.llm_stream_mode,
+                aggressive_min_tokens=self.aggressive_min_tokens,
+            )
+            for chunk in ready:
+                yield chunk
 
-        if token_buffer:
-            yield "".join(token_buffer) + "."
+        tail = finalize_tail(buffer)
+        if tail is not None:
+            yield tail
 
 
 class MockTTS:
@@ -136,3 +156,7 @@ class MockTTS:
         for _ in range(chunk_count):
             await asyncio.sleep(self.chunk_delay_ms / 1000.0)
             yield b"\x00" * self.bytes_per_chunk
+
+    async def stop_streaming(self, turn_id: str) -> None:
+        # Mock provider has no persistent stream handle to cancel.
+        return

@@ -4,17 +4,26 @@ import argparse
 import asyncio
 import json
 import math
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
+from .aec import ReferenceEchoCanceller
 from .asr_dataset import load_audio_samples
+from .eou import build_eou_decider
 from .http_providers import HTTPASRProvider, HTTPTTSProvider
+from .live_simulation import (
+    pcm_to_chunks,
+    simulate_interruptible_live_stream,
+    simulate_live_stream,
+    trim_chunks,
+)
 from .pipeline import StreamingVoicePipeline
 from .real_llm import OpenAICompatibleLLM
 from .real_vad import SileroVADProvider
-from .types import AudioChunk, TurnRequest
+from .types import TurnRequest
 from .webrtc_rpc import default_webrtc_offer_url
 
 
@@ -49,49 +58,37 @@ def _percentile(values: list[float], pct: float) -> float | None:
     return round(low_v + (high_v - low_v) * (rank - low), 2)
 
 
-def _pcm_to_chunks(pcm16: bytes, sample_rate_hz: int, chunk_ms: int = 20) -> list[AudioChunk]:
-    bytes_per_sample = 2
-    samples_per_chunk = int((sample_rate_hz * chunk_ms) / 1000)
-    bytes_per_chunk = max(2, samples_per_chunk * bytes_per_sample)
-
-    chunks: list[AudioChunk] = []
-    for idx in range(0, len(pcm16), bytes_per_chunk):
-        part = pcm16[idx : idx + bytes_per_chunk]
-        if len(part) < bytes_per_chunk:
-            part = part + (b"\x00" * (bytes_per_chunk - len(part)))
-
-        chunks.append(
-            AudioChunk(
-                pcm=part,
-                duration_ms=chunk_ms,
-                sample_rate_hz=sample_rate_hz,
-                is_speech=True,
-            )
-        )
-
-    silence = b"\x00" * bytes_per_chunk
-    for _ in range(20):
-        chunks.append(
-            AudioChunk(
-                pcm=silence,
-                duration_ms=chunk_ms,
-                sample_rate_hz=sample_rate_hz,
-                is_speech=False,
-            )
-        )
-
-    return chunks
-
-
 def _summarize(rows: list[dict[str, Any]], concurrency: int) -> dict[str, Any]:
-    s2a = [float(r["speech_to_first_audio_ms"]) for r in rows if r["speech_to_first_audio_ms"] is not None]
-    s2d = [float(r["speech_to_done_ms"]) for r in rows if r["speech_to_done_ms"] is not None]
-    mic2a = [float(r["mic_to_first_audio_ms"]) for r in rows if r.get("mic_to_first_audio_ms") is not None]
-    e2e = [float(r["e2e_ms"]) for r in rows]
+    def _pluck(key: str) -> list[float]:
+        return [float(row[key]) for row in rows if row.get(key) is not None]
+
+    s2a = _pluck("speech_to_first_audio_ms")
+    s2d = _pluck("speech_to_done_ms")
+    mic2a = _pluck("mic_to_first_audio_ms")
+    e2e = _pluck("e2e_ms")
+    total_e2e = _pluck("total_e2e_ms")
+    vad_endpoint = _pluck("vad_endpoint_ms")
+    asr_complete = _pluck("asr_complete_ms")
+    llm_ttft = _pluck("llm_ttft_ms")
+    tts_ttfb = _pluck("tts_ttfb_ms")
+
+    interrupted = sum(1 for row in rows if bool(row.get("interrupted")))
 
     return {
         "concurrency": concurrency,
         "calls": len(rows),
+        "interrupted_calls": interrupted,
+        "interrupted_rate_pct": round((interrupted / max(1, len(rows))) * 100.0, 2),
+        "vad_endpoint_p50_ms": _percentile(vad_endpoint, 50),
+        "vad_endpoint_p95_ms": _percentile(vad_endpoint, 95),
+        "asr_complete_p50_ms": _percentile(asr_complete, 50),
+        "asr_complete_p95_ms": _percentile(asr_complete, 95),
+        "llm_ttft_p50_ms": _percentile(llm_ttft, 50),
+        "llm_ttft_p95_ms": _percentile(llm_ttft, 95),
+        "tts_ttfb_p50_ms": _percentile(tts_ttfb, 50),
+        "tts_ttfb_p95_ms": _percentile(tts_ttfb, 95),
+        "total_e2e_p50_ms": _percentile(total_e2e, 50),
+        "total_e2e_p95_ms": _percentile(total_e2e, 95),
         "speech_to_first_audio_p50_ms": _percentile(s2a, 50),
         "speech_to_first_audio_p95_ms": _percentile(s2a, 95),
         "mic_to_first_audio_p50_ms": _percentile(mic2a, 50),
@@ -100,8 +97,8 @@ def _summarize(rows: list[dict[str, Any]], concurrency: int) -> dict[str, Any]:
         "speech_to_done_p95_ms": _percentile(s2d, 95),
         "e2e_p50_ms": _percentile(e2e, 50),
         "e2e_p95_ms": _percentile(e2e, 95),
-        "mean_asr_queue_wait_ms": round(mean(r["asr_queue_wait_ms"] for r in rows), 2),
-        "mean_tts_queue_wait_ms": round(mean(r["tts_queue_wait_ms"] for r in rows), 2),
+        "mean_asr_queue_wait_ms": round(mean(row["asr_queue_wait_ms"] for row in rows), 2),
+        "mean_tts_queue_wait_ms": round(mean(row["tts_queue_wait_ms"] for row in rows), 2),
         "lt_700ms_first_audio_hit_rate_pct": round(
             (sum(1 for x in s2a if x < 700.0) / max(1, len(s2a))) * 100.0,
             2,
@@ -114,6 +111,9 @@ def _summarize(rows: list[dict[str, Any]], concurrency: int) -> dict[str, Any]:
 
 
 async def run_live_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    if args.seed >= 0:
+        random.seed(args.seed)
+
     samples, source = load_audio_samples(
         source=args.dataset_source,
         limit=max(1, args.sample_pool),
@@ -132,7 +132,25 @@ async def run_live_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         streaming=args.vad_streaming,
         partial_segment_ms=args.vad_partial_segment_ms,
         max_stream_segment_ms=args.vad_max_stream_segment_ms,
+        use_chunk_flags=args.vad_use_chunk_flags,
     )
+
+    eou_decider = build_eou_decider(
+        args.eou_mode,
+        model_name=args.eou_model,
+        min_words=args.eou_min_words,
+        min_chars=args.eou_min_chars,
+    )
+
+    aec_factory = None
+    if args.aec_enabled:
+        aec_factory = lambda: ReferenceEchoCanceller(
+            history_ms=args.aec_history_ms,
+            chunk_ms=args.audio_chunk_ms,
+            correlation_threshold=args.aec_correlation_threshold,
+            min_rms=args.aec_min_rms,
+        )
+
     if args.transport == "webrtc":
         from .webrtc_providers import WebRTCASRProvider, WebRTCLLMProvider, WebRTCTTSProvider
 
@@ -175,13 +193,32 @@ async def run_live_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         )
         tts = HTTPTTSProvider(base_url=args.tts_url)
 
-    pipeline = StreamingVoicePipeline(vad=vad, asr=asr, llm=llm, tts=tts)
+    pipeline = StreamingVoicePipeline(
+        vad=vad,
+        asr=asr,
+        llm=llm,
+        tts=tts,
+        eou_decider=eou_decider,
+        aec_factory=aec_factory,
+    )
+
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def run_one(index: int) -> dict[str, Any]:
         async with semaphore:
             sample = samples[index % len(samples)]
-            chunks = _pcm_to_chunks(sample.pcm16, sample.sample_rate_hz)
+            chunks = pcm_to_chunks(
+                sample.pcm16,
+                sample.sample_rate_hz,
+                chunk_ms=args.audio_chunk_ms,
+                trailing_silence_ms=args.trailing_silence_ms,
+            )
+
+            simulate_barge_in = (
+                args.simulate_barge_in_rate > 0.0
+                and random.random() < min(1.0, max(0.0, args.simulate_barge_in_rate))
+            )
+
             request = TurnRequest(
                 call_id=f"call-{index}",
                 turn_id=f"turn-{index}",
@@ -189,10 +226,48 @@ async def run_live_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 enable_barge_in=args.enable_barge_in,
                 barge_in_min_speech_ms=args.barge_in_min_speech_ms,
             )
-            output = await pipeline.run_turn_from_chunks(request=request, chunks=chunks)
+
+            if simulate_barge_in:
+                tts_started = asyncio.Event()
+                barge_chunks = trim_chunks(
+                    pcm_to_chunks(
+                        sample.pcm16,
+                        sample.sample_rate_hz,
+                        chunk_ms=args.audio_chunk_ms,
+                        trailing_silence_ms=args.trailing_silence_ms,
+                    ),
+                    max_duration_ms=args.barge_in_utterance_ms,
+                )
+
+                async def _on_audio_chunk(_: bytes) -> None:
+                    tts_started.set()
+
+                audio_stream = simulate_interruptible_live_stream(
+                    chunks,
+                    barge_chunks,
+                    barge_in_trigger=tts_started,
+                    barge_in_delay_ms=args.barge_in_delay_ms,
+                    barge_in_timeout_ms=args.barge_in_timeout_ms,
+                    real_time=args.simulate_realtime,
+                    speedup=args.realtime_speedup,
+                )
+                output = await pipeline.run_turn(
+                    request=request,
+                    audio_stream=audio_stream,
+                    on_audio_chunk=_on_audio_chunk,
+                )
+            else:
+                audio_stream = simulate_live_stream(
+                    chunks,
+                    real_time=args.simulate_realtime,
+                    speedup=args.realtime_speedup,
+                )
+                output = await pipeline.run_turn(request=request, audio_stream=audio_stream)
+
             row = output.latency.to_dict()
             row["audio_bytes"] = len(output.audio_bytes)
             row["source_id"] = sample.source_id
+            row["barge_in_simulated"] = simulate_barge_in
             return row
 
     rows = await asyncio.gather(*(run_one(i) for i in range(args.calls)))
@@ -209,6 +284,16 @@ async def run_live_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "webrtc_timeout_s": args.webrtc_timeout_s if args.transport == "webrtc" else None,
             "webrtc_reuse_session": args.webrtc_reuse_session if args.transport == "webrtc" else None,
         },
+        "runtime_config": {
+            "simulate_realtime": args.simulate_realtime,
+            "realtime_speedup": args.realtime_speedup,
+            "audio_chunk_ms": args.audio_chunk_ms,
+            "trailing_silence_ms": args.trailing_silence_ms,
+            "simulate_barge_in_rate": args.simulate_barge_in_rate,
+            "barge_in_delay_ms": args.barge_in_delay_ms,
+            "eou_mode": args.eou_mode,
+            "aec_enabled": args.aec_enabled,
+        },
         "dataset_source_used": source,
         "summary": summary,
         "calls": rows,
@@ -224,9 +309,10 @@ def _save(report: dict[str, Any], output_path: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Concurrent benchmark over live ASR/LLM/TTS endpoints.")
-    parser.add_argument("--calls", type=int, default=6)
-    parser.add_argument("--concurrency", type=int, default=2)
-    parser.add_argument("--sample-pool", type=int, default=2)
+    parser.add_argument("--calls", type=int, default=20)
+    parser.add_argument("--concurrency", type=int, default=5)
+    parser.add_argument("--sample-pool", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=7)
 
     parser.add_argument("--dataset-source", type=str, default="hf", choices=["hf", "kaggle", "tts", "mock"])
     parser.add_argument("--hf-dataset", type=str, default="hf-internal-testing/librispeech_asr_dummy")
@@ -250,12 +336,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--webrtc-timeout-s", type=float, default=120.0)
     parser.add_argument("--webrtc-reuse-session", type=_parse_bool_arg, default=True)
 
+    parser.add_argument("--audio-chunk-ms", type=int, default=20)
+    parser.add_argument("--trailing-silence-ms", type=int, default=400)
+    parser.add_argument("--simulate-realtime", type=_parse_bool_arg, default=True)
+    parser.add_argument("--realtime-speedup", type=float, default=1.0)
+    parser.add_argument("--simulate-barge-in-rate", type=float, default=0.0)
+    parser.add_argument("--barge-in-delay-ms", type=int, default=120)
+    parser.add_argument("--barge-in-timeout-ms", type=int, default=5000)
+    parser.add_argument("--barge-in-utterance-ms", type=int, default=900)
+
     parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--vad-min-speech-ms", type=int, default=200)
     parser.add_argument("--vad-min-silence-ms", type=int, default=300)
     parser.add_argument("--vad-streaming", type=_parse_bool_arg, default=True)
+    parser.add_argument("--vad-use-chunk-flags", type=_parse_bool_arg, default=False)
     parser.add_argument("--vad-partial-segment-ms", type=int, default=320)
     parser.add_argument("--vad-max-stream-segment-ms", type=int, default=1280)
+
+    parser.add_argument("--eou-mode", type=str, default="heuristic", choices=["off", "heuristic", "parakeet"])
+    parser.add_argument("--eou-model", type=str, default="nvidia/parakeet_realtime_eou_120m-v1")
+    parser.add_argument("--eou-min-words", type=int, default=3)
+    parser.add_argument("--eou-min-chars", type=int, default=8)
+
+    parser.add_argument("--aec-enabled", type=_parse_bool_arg, default=True)
+    parser.add_argument("--aec-history-ms", type=int, default=1500)
+    parser.add_argument("--aec-correlation-threshold", type=float, default=0.92)
+    parser.add_argument("--aec-min-rms", type=float, default=0.003)
 
     parser.add_argument("--enable-barge-in", type=_parse_bool_arg, default=True)
     parser.add_argument("--barge-in-min-speech-ms", type=int, default=120)

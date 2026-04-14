@@ -12,6 +12,7 @@ class AudioChunk:
     duration_ms: int = 20
     sample_rate_hz: int = 16000
     is_speech: bool = True
+    source: str = "user"
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,8 @@ class SpeechSegment:
     chunks: tuple[AudioChunk, ...]
     sample_rate_hz: int = 16000
     ended_by_silence: bool = True
+    last_speech_chunk_at: float | None = None
+    endpoint_at: float | None = None
 
     @property
     def duration_ms(self) -> int:

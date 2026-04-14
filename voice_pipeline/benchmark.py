@@ -54,6 +54,11 @@ def summarize(latencies: list[dict[str, Any]], concurrency: int) -> dict[str, An
         for item in latencies
         if item["speech_to_first_audio_ms"] is not None
     ]
+    mic_to_audio = [
+        float(item["mic_to_first_audio_ms"])
+        for item in latencies
+        if item.get("mic_to_first_audio_ms") is not None
+    ]
     speech_to_done = [
         float(item["speech_to_done_ms"])
         for item in latencies
@@ -69,6 +74,8 @@ def summarize(latencies: list[dict[str, Any]], concurrency: int) -> dict[str, An
         "calls": len(latencies),
         "speech_to_first_audio_p50_ms": percentile(speech_to_audio, 50),
         "speech_to_first_audio_p95_ms": percentile(speech_to_audio, 95),
+        "mic_to_first_audio_p50_ms": percentile(mic_to_audio, 50),
+        "mic_to_first_audio_p95_ms": percentile(mic_to_audio, 95),
         "speech_to_done_p50_ms": percentile(speech_to_done, 50),
         "speech_to_done_p95_ms": percentile(speech_to_done, 95),
         "e2e_p50_ms": percentile(e2e, 50),
@@ -76,6 +83,10 @@ def summarize(latencies: list[dict[str, Any]], concurrency: int) -> dict[str, An
         "mean_asr_queue_wait_ms": round(mean(item["asr_queue_wait_ms"] for item in latencies), 2),
         "mean_tts_queue_wait_ms": round(mean(item["tts_queue_wait_ms"] for item in latencies), 2),
         "target_lt_700ms_hit_rate_pct": hit_rate,
+        "lt_800ms_first_audio_hit_rate_pct": round(
+            (sum(1 for value in speech_to_audio if value < 800.0) / max(1, len(speech_to_audio))) * 100.0,
+            2,
+        ),
     }
 
 

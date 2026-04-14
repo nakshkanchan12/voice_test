@@ -6,6 +6,7 @@ aiortc
 openai
 numpy
 soundfile
+sounddevice
 silero-vad
 
 # ASR stack (Nemotron endpoint deployment is external)

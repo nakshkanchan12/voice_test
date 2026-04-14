@@ -37,3 +37,14 @@ class TTSProvider(Protocol):
 
     async def stop_streaming(self, turn_id: str) -> None:
         ...
+
+
+class EOUProvider(Protocol):
+    async def is_end_of_utterance(
+        self,
+        transcript: str,
+        *,
+        request: TurnRequest,
+        segment: SpeechSegment,
+    ) -> bool:
+        ...

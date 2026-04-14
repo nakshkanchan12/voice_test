@@ -9,6 +9,7 @@ faster-whisper
 jiwer
 datasets
 soundfile
+sounddevice
 numpy
 silero-vad
 piper-tts

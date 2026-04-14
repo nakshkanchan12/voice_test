@@ -5,17 +5,33 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import AsyncIterator, Awaitable, Callable
 
-from .interfaces import ASRProvider, LLMProvider, TTSProvider, VADProvider
+from .aec import ReferenceEchoCanceller
+from .interfaces import ASRProvider, EOUProvider, LLMProvider, TTSProvider, VADProvider
 from .metrics import TurnLatency, _elapsed_ms
 from .types import AudioChunk, TurnRequest, iter_chunks
 
 AudioChunkCallback = Callable[[bytes], Awaitable[None]]
+AECCancellerFactory = Callable[[], ReferenceEchoCanceller]
 
 
 @dataclass
 class TurnOutput:
     audio_bytes: bytes
     latency: TurnLatency
+
+
+class BargeInController:
+    def __init__(self, tts: TTSProvider, turn_id: str) -> None:
+        self._tts = tts
+        self._turn_id = turn_id
+        self.interrupted = asyncio.Event()
+
+    async def interrupt(self) -> None:
+        self.interrupted.set()
+        try:
+            await self._tts.stop_streaming(self._turn_id)
+        except Exception:
+            return
 
 
 class StreamingVoicePipeline:
@@ -29,6 +45,8 @@ class StreamingVoicePipeline:
         tts: TTSProvider,
         asr_queue_size: int = 2,
         tts_queue_size: int = 2,
+        eou_decider: EOUProvider | None = None,
+        aec_factory: AECCancellerFactory | None = None,
     ) -> None:
         self.vad = vad
         self.asr = asr
@@ -36,6 +54,8 @@ class StreamingVoicePipeline:
         self.tts = tts
         self.asr_queue_size = asr_queue_size
         self.tts_queue_size = tts_queue_size
+        self.eou_decider = eou_decider
+        self.aec_factory = aec_factory
 
     async def run_turn(
         self,
@@ -51,6 +71,9 @@ class StreamingVoicePipeline:
         latency = TurnLatency(call_id=request.call_id, turn_id=request.turn_id)
         active_generation = 0
         tts_playing = asyncio.Event()
+        barge_in_controller = BargeInController(tts=self.tts, turn_id=request.turn_id)
+        aec = self.aec_factory() if self.aec_factory is not None else None
+        eou_transcript_parts: list[str] = []
 
         def _flush_tts_queue() -> None:
             preserved: list[object] = []
@@ -67,47 +90,89 @@ class StreamingVoicePipeline:
                 tts_queue.put_nowait(item)
 
         async def _stop_tts_for_turn() -> None:
-            stop_fn = getattr(self.tts, "stop_streaming", None)
-            if stop_fn is None:
-                return
-
             try:
-                await stop_fn(request.turn_id)
-            except TypeError:
-                # Backward-compatible fallback for alternate stop signatures.
-                try:
-                    await stop_fn(request)
-                except Exception:
-                    return
+                await self.tts.stop_streaming(request.turn_id)
             except Exception:
                 return
+
+        async def _enqueue_transcript(generation: int, transcript: str) -> None:
+            cleaned = transcript.strip()
+            if not cleaned:
+                return
+
+            wait_started = perf_counter()
+            await asr_queue.put((generation, cleaned))
+            latency.add_asr_queue_wait(_elapsed_ms(wait_started, perf_counter()))
 
         async def asr_stage() -> None:
             nonlocal active_generation
             async for segment in self.vad.stream_segments(audio_stream):
                 if segment.ended_by_silence:
-                    latency.mark_speech_end()
+                    latency.mark_speech_end(
+                        endpoint_at=segment.endpoint_at,
+                        last_speech_chunk_at=segment.last_speech_chunk_at,
+                    )
+
+                if aec is not None and tts_playing.is_set() and aec.is_echo_segment(segment):
+                    continue
 
                 if (
                     request.enable_barge_in
                     and tts_playing.is_set()
-                    and latency.speech_end_at is not None
                     and segment.duration_ms >= max(1, request.barge_in_min_speech_ms)
                 ):
                     active_generation += 1
-                    latency.mark_cancelled_by_barge_in()
+                    eou_transcript_parts.clear()
+                    latency.mark_interrupted()
                     _flush_tts_queue()
+                    await barge_in_controller.interrupt()
                     await _stop_tts_for_turn()
 
                 transcript = (await self.asr.transcribe(segment, request)).strip()
+                if transcript:
+                    latency.asr_segments += 1
+                    latency.mark_asr_text()
+
+                if segment.ended_by_silence:
+                    latency.mark_asr_complete()
+
+                if self.eou_decider is not None:
+                    if transcript:
+                        eou_transcript_parts.append(transcript)
+
+                    if not segment.ended_by_silence:
+                        continue
+
+                    merged = " ".join(eou_transcript_parts).strip()
+                    eou_transcript_parts.clear()
+                    if not merged:
+                        continue
+
+                    should_finalize = await self.eou_decider.is_end_of_utterance(
+                        merged,
+                        request=request,
+                        segment=segment,
+                    )
+                    latency.mark_eou_decision(should_finalize)
+                    if not should_finalize:
+                        eou_transcript_parts.append(merged)
+                        continue
+
+                    await _enqueue_transcript(active_generation, merged)
+                    continue
+
                 if not transcript:
                     continue
 
-                latency.asr_segments += 1
-                latency.mark_asr_text()
-                wait_started = perf_counter()
-                await asr_queue.put((active_generation, transcript))
-                latency.add_asr_queue_wait(_elapsed_ms(wait_started, perf_counter()))
+                await _enqueue_transcript(active_generation, transcript)
+
+            if self.eou_decider is not None and eou_transcript_parts:
+                merged = " ".join(eou_transcript_parts).strip()
+                eou_transcript_parts.clear()
+                if merged:
+                    if latency.asr_complete_at is None:
+                        latency.mark_asr_complete()
+                    await _enqueue_transcript(active_generation, merged)
 
             await asr_queue.put(asr_done)
 
@@ -121,6 +186,8 @@ class StreamingVoicePipeline:
                 transcript_generation, transcript = item
                 if transcript_generation != active_generation:
                     continue
+
+                latency.mark_llm_request_sent()
 
                 async for sentence in self.llm.stream_sentences(transcript, request):
                     if transcript_generation != active_generation:
@@ -158,6 +225,9 @@ class StreamingVoicePipeline:
 
                         if not pcm:
                             continue
+
+                        if aec is not None:
+                            aec.register_tts_audio(pcm)
 
                         latency.tts_chunks += 1
                         latency.mark_tts_byte()
